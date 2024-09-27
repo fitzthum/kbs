@@ -5,12 +5,24 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::Engine;
+use ear::{Appraisal, RawValue};
 use sha2::{Digest, Sha384};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
 use super::{PolicyDigest, PolicyEngine, PolicyError};
+
+const CLAIM_NAMES: [&str; 8] = [
+    "instance_identity",
+    "configuration",
+    "executables",
+    "file_system",
+    "hardware",
+    "runtime_opaque",
+    "storage_opaque",
+    "sourced_data",
+];
 
 #[derive(Debug, Clone)]
 pub struct OPA {
@@ -34,7 +46,8 @@ impl OPA {
         default_policy_path.push("default.rego");
         if !default_policy_path.as_path().exists() {
             let policy = std::include_str!("default_policy.rego").to_string();
-            fs::write(&default_policy_path, policy).map_err(PolicyError::WriteDefaultPolicyFailed)?;
+            fs::write(&default_policy_path, policy)
+                .map_err(PolicyError::WriteDefaultPolicyFailed)?;
         }
 
         Ok(Self { policy_dir_path })
@@ -52,66 +65,81 @@ impl PolicyEngine for OPA {
     async fn evaluate(
         &self,
         reference_data_map: HashMap<String, Vec<String>>,
-        input: String,
-        policy_ids: Vec<String>,
-    ) -> Result<HashMap<String, PolicyDigest>, PolicyError> {
-        let mut res = HashMap::new();
+        tcb_claims: BTreeMap<String, RawValue>,
+        policy_id: String,
+    ) -> Result<Appraisal, PolicyError> {
+        let mut appraisal = Appraisal::new();
 
         let policy_dir_path = self
             .policy_dir_path
             .to_str()
             .ok_or_else(|| PolicyError::PolicyDirPathToStringFailed)?;
 
-        for policy_id in &policy_ids {
-            let input = input.clone();
-            let policy_file_path = format!("{policy_dir_path}/{policy_id}.rego");
+        let tcb_claims_json = serde_json::to_string(&tcb_claims)?;
+        let policy_file_path = format!("{policy_dir_path}/{policy_id}.rego");
 
-            let policy = tokio::fs::read_to_string(policy_file_path.clone())
-                .await
-                .map_err(PolicyError::ReadPolicyFileFailed)?;
+        let policy = tokio::fs::read_to_string(policy_file_path.clone())
+            .await
+            .map_err(PolicyError::ReadPolicyFileFailed)?;
 
-            let mut engine = regorus::Engine::new();
+        let mut engine = regorus::Engine::new();
 
-            let policy_hash = {
-                use sha2::Digest;
-                let mut hasher = sha2::Sha384::new();
-                hasher.update(&policy);
-                let hex = hasher.finalize().to_vec();
-                hex::encode(hex)
-            };
+        let policy_hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha384::new();
+            hasher.update(&policy);
+            let hex = hasher.finalize().to_vec();
+            hex::encode(hex)
+        };
 
-            // Add policy as data
-            engine
-                .add_policy(policy_id.clone(), policy)
-                .map_err(PolicyError::LoadPolicyFailed)?;
+        // Add policy as data
+        engine
+            .add_policy(policy_id.clone(), policy)
+            .map_err(PolicyError::LoadPolicyFailed)?;
 
-            let reference_data_map = serde_json::to_string(&reference_data_map)?;
-            let reference_data_map =
-                regorus::Value::from_json_str(&format!("{{\"reference\":{reference_data_map}}}"))
-                    .map_err(PolicyError::JsonSerializationFailed)?;
-            engine
-                .add_data(reference_data_map)
-                .map_err(PolicyError::LoadReferenceDataFailed)?;
+        let reference_data_map = serde_json::to_string(&reference_data_map)?;
+        let reference_data_map =
+            regorus::Value::from_json_str(&format!("{{\"reference\":{reference_data_map}}}"))
+                .map_err(PolicyError::JsonSerializationFailed)?;
+        engine
+            .add_data(reference_data_map)
+            .map_err(PolicyError::LoadReferenceDataFailed)?;
 
-            // Add TCB claims as input
-            engine
-                .set_input_json(&input)
-                .context("set input")
-                .map_err(PolicyError::SetInputDataFailed)?;
+        // Add TCB claims as input
+        engine
+            .set_input_json(&tcb_claims_json)
+            .context("set input")
+            .map_err(PolicyError::SetInputDataFailed)?;
 
-            let allow = engine
-                .eval_bool_query("data.policy.allow".to_string(), false)
-                .map_err(PolicyError::EvalPolicyFailed)?;
-            if !allow {
-                return Err(PolicyError::PolicyDenied {
-                    policy_id: policy_id.clone(),
-                });
+        for claim_name in CLAIM_NAMES {
+            let rule = format!("data.policy.{}", claim_name);
+
+            if let Ok(claim_value) = engine.eval_rule(rule) {
+                let claim_value = claim_value
+                    .as_i64()
+                    .map_err(|_| PolicyError::InvalidClaimValue)?;
+                let claim_value =
+                    i8::try_from(claim_value).map_err(|_| PolicyError::InvalidClaimValue)?;
+
+                appraisal
+                    .trust_vector
+                    .mut_by_name(claim_name)
+                    .unwrap()
+                    .set(claim_value);
             }
-
-            res.insert(policy_id.clone(), policy_hash);
         }
 
-        Ok(res)
+        if !appraisal.trust_vector.any_set() {
+            return Err(PolicyError::PolicyDenied {
+                policy_id: policy_id.clone(),
+            });
+        }
+
+        appraisal.update_status_from_trust_vector();
+        appraisal.annotated_evidence = tcb_claims;
+        appraisal.policy_id = Some(policy_hash);
+
+        Ok(appraisal)
     }
 
     async fn set_policy(&mut self, policy_id: String, policy: String) -> Result<(), PolicyError> {
@@ -183,52 +211,75 @@ impl PolicyEngine for OPA {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ear::RawValue;
+    use rstest::rstest;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
-    fn dummy_reference(ver: u64) -> String {
+    use super::*;
+
+    fn dummy_reference(product_id: u64, svn: u64, launch_digest: String) -> String {
         json!({
-            "productId": [ver.to_string()],
-            "svn": [ver.to_string()]
+            "productId": [product_id.to_string()],
+            "svn": [svn.to_string()],
+            "launch_digest": [launch_digest]
         })
         .to_string()
     }
 
-    fn dummy_input(product_id: u64, svn: u64) -> String {
-        json!({
-            "productId": product_id.to_string(),
-            "svn": svn.to_string()
-        })
-        .to_string()
+    fn dummy_input(product_id: u64, svn: u64, launch_digest: String) -> BTreeMap<String, RawValue> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "productId".to_string(),
+            RawValue::Text(product_id.to_string()),
+        );
+        map.insert("svn".to_string(), RawValue::Text(svn.to_string()));
+        map.insert("launch_digest".to_string(), RawValue::Text(launch_digest));
+
+        map
     }
 
+    #[rstest]
+    #[case(5,5,1,1,"aac43bb3".to_string(),"aac43bb3".to_string(),3,2)]
+    #[case(5,4,1,1,"aac43bb3".to_string(),"aac43bb3".to_string(),3,97)]
+    #[case(5,5,1,1,"aac43bb4".to_string(),"aac43bb3".to_string(),33,2)]
+    #[case(5,5,2,1,"aac43bb4".to_string(),"aac43bb3".to_string(),33,97)]
     #[tokio::test]
-    async fn test_evaluate() {
+    async fn test_evaluate(
+        #[case] pid_a: u64,
+        #[case] pid_b: u64,
+        #[case] svn_a: u64,
+        #[case] svn_b: u64,
+        #[case] digest_a: String,
+        #[case] digest_b: String,
+        #[case] ex_exp: i8,
+        #[case] hw_exp: i8,
+    ) {
         let opa = OPA {
             policy_dir_path: PathBuf::from("./src/policy_engine/opa"),
         };
         let default_policy_id = "default_policy".to_string();
 
         let reference_data: HashMap<String, Vec<String>> =
-            serde_json::from_str(&dummy_reference(5)).unwrap();
+            serde_json::from_str(&dummy_reference(pid_a, svn_a, digest_a)).unwrap();
 
-        let res = opa
+        let appraisal = opa
             .evaluate(
                 reference_data.clone(),
-                dummy_input(5, 5),
-                vec![default_policy_id.clone()],
+                dummy_input(pid_b, svn_b, digest_b),
+                default_policy_id.clone(),
             )
-            .await;
-        let res = res.expect("OPA execution should succeed");
-        // this expected value is calculated by `sha384sum`
-        let expected_digest = "c0e7929671fb6780387f54760d84d65d2ce96093dfb33efda21f5eb05afcda77bba444c02cd177b23a5d350716726157";
-        assert_eq!(expected_digest, res["default_policy"]);
+            .await
+            .unwrap();
 
-        let res = opa
-            .evaluate(reference_data, dummy_input(0, 0), vec![default_policy_id])
-            .await;
-
-        res.expect_err("OPA execution should fail");
+        assert_eq!(
+            hw_exp,
+            appraisal.trust_vector.by_name("hardware").unwrap().get()
+        );
+        assert_eq!(
+            ex_exp,
+            appraisal.trust_vector.by_name("executables").unwrap().get()
+        );
     }
 
     #[tokio::test]

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use ear::{Appraisal, RawValue};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::Path;
 use strum::EnumString;
@@ -41,6 +42,8 @@ pub enum PolicyError {
     EvalPolicyFailed(#[source] anyhow::Error),
     #[error("json serialization failed: {0}")]
     JsonSerializationFailed(#[source] anyhow::Error),
+    #[error("Policy claim value not valid (must be between -127 and 127)")]
+    InvalidClaimValue,
 }
 
 #[derive(Debug, EnumString, Deserialize)]
@@ -62,18 +65,14 @@ type PolicyDigest = String;
 
 #[async_trait]
 pub trait PolicyEngine {
-    /// Verify an input body against a set of ref values and a list of policies
-    /// return a list of policy ids with their sha384 at eval time
-    /// abort early on first failed validation and any errors.
-    /// The result is a key-value map.
-    /// - `key`: the policy id
-    /// - `value`: the digest of the policy (using **Sha384**).
+    /// Verify an input body against a set of ref values and a policy id
+    /// return an EAR Appraisal
     async fn evaluate(
         &self,
         reference_data_map: HashMap<String, Vec<String>>,
-        input: String,
-        policy_ids: Vec<String>,
-    ) -> Result<HashMap<String, PolicyDigest>, PolicyError>;
+        tcb_claims: BTreeMap<String, RawValue>,
+        policy_id: String,
+    ) -> Result<Appraisal, PolicyError>;
 
     async fn set_policy(&mut self, policy_id: String, policy: String) -> Result<(), PolicyError>;
 
