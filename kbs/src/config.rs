@@ -121,10 +121,7 @@ mod tests {
     #[cfg(feature = "coco-as-builtin")]
     use attestation_service::{
         rvps::{RvpsConfig, DEFAULT_STORAGE_TYPE},
-        token::{
-            AttestationTokenBrokerType, AttestationTokenConfig, COCO_AS_ISSUER_NAME,
-            DEFAULT_TOKEN_TIMEOUT,
-        },
+        token::{simple, AttestationTokenConfig, COCO_AS_ISSUER_NAME, DEFAULT_TOKEN_DURATION},
     };
 
     use rstest::rstest;
@@ -184,18 +181,17 @@ mod tests {
                 crate::attestation::config::AttestationServiceConfig::CoCoASBuiltIn(
                     attestation_service::config::Config {
                         work_dir: "/opt/coco/attestation-service".into(),
-                        policy_engine: "opa".into(),
-                        attestation_token_broker: AttestationTokenBrokerType::Simple,
                         rvps_config: RvpsConfig {
                             remote_addr: "http://127.0.0.1:50003".into(),
                             store_type: DEFAULT_STORAGE_TYPE.into(),
                             store_config: json!({}),
                         },
-                        attestation_token_config: AttestationTokenConfig {
-                            duration_min: DEFAULT_TOKEN_TIMEOUT,
+                        attestation_token_broker: AttestationTokenConfig::Simple(simple::Configuration {
+                            duration_min: DEFAULT_TOKEN_DURATION,
                             issuer_name: COCO_AS_ISSUER_NAME.into(),
                             signer: None,
-                        },
+                            ..Default::default()
+                        }),
                     }
                 ),
             timeout: crate::attestation::config::DEFAULT_TIMEOUT,
@@ -299,17 +295,15 @@ mod tests {
                 crate::attestation::config::AttestationServiceConfig::CoCoASBuiltIn(
                     attestation_service::config::Config {
                         work_dir: "/opt/confidential-containers/attestation-service".into(),
-                        policy_engine: "opa".into(),
-                        attestation_token_broker: AttestationTokenBrokerType::Simple,
                         rvps_config: RvpsConfig {
                             remote_addr: "".into(),
                             store_type: "LocalFs".into(),
                             store_config: json!({}),
                         },
-                        attestation_token_config: AttestationTokenConfig {
+                        attestation_token_broker: AttestationTokenConfig::Simple(simple::Configuration{
                             duration_min: 5,
                             ..Default::default()
-                        },
+                        }),
                     }
                 ),
             timeout: crate::attestation::config::DEFAULT_TIMEOUT,
@@ -432,17 +426,15 @@ mod tests {
                 crate::attestation::config::AttestationServiceConfig::CoCoASBuiltIn(
                     attestation_service::config::Config {
                         work_dir: "/opt/confidential-containers/attestation-service".into(),
-                        policy_engine: "opa".into(),
-                        attestation_token_broker: AttestationTokenBrokerType::Simple,
                         rvps_config: RvpsConfig {
                             remote_addr: "".into(),
                             store_type: "LocalFs".into(),
                             ..Default::default()
                         },
-                        attestation_token_config: AttestationTokenConfig {
+                        attestation_token_broker: AttestationTokenConfig::Simple(simple::Configuration {
                             duration_min: 5,
                             ..Default::default()
-                        },
+                        }),
                     }
                 ),
             timeout: crate::attestation::config::DEFAULT_TIMEOUT,
