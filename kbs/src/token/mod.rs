@@ -2,21 +2,41 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use async_trait::async_trait;
+use ear::EarAttestationTokenVerifier;
 use jwk::JwkAttestationTokenVerifier;
 use kbs_types::TeePubKey;
 use log::debug;
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
+use strum::EnumString;
+use tokio::sync::RwLock;
 
+mod ear;
 mod error;
 pub(crate) mod jwk;
 pub use error::*;
 
 pub const TOKEN_TEE_PUBKEY_PATH_ITA: &str = "/attester_runtime_data/tee-pubkey";
 pub const TOKEN_TEE_PUBKEY_PATH_COCO: &str = "/customized_claims/runtime_data/tee-pubkey";
+pub const TOKEN_TEE_PUBKEY_PATH_EAR: &str =
+    "/submods/cpu/ear.veraison.annotated-evidence/runtime_data_claims/tee-pubkey";
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Deserialize, Default, Debug, Clone, EnumString, PartialEq)]
+pub enum AttestationTokenVerifierType {
+    Jwk,
+    #[default]
+    Ear,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct AttestationTokenVerifierConfig {
+    #[serde(default)]
+    /// The type of attestation token that KBS will expect.
+    /// Can be `Ear` or `Jwk`
+    pub attestation_token_type: AttestationTokenVerifierType,
+
     #[serde(default)]
     /// The paths to the tee public key in the JWT body. For example,
     /// `/attester_runtime_data/tee-pubkey` refers to the key
@@ -49,28 +69,47 @@ pub struct AttestationTokenVerifierConfig {
     pub insecure_key: bool,
 }
 
+#[async_trait]
+pub trait AttestationTokenVerifier {
+    /// Verify an signed attestation token.
+    /// Returns the custom claims JSON string of the token.
+    async fn verify(&self, token: String) -> anyhow::Result<Value>;
+}
+
 #[derive(Clone)]
 pub struct TokenVerifier {
-    verifier: JwkAttestationTokenVerifier,
+    verifier: Arc<RwLock<dyn AttestationTokenVerifier + Send + Sync>>,
     extra_teekey_paths: Vec<String>,
 }
 
 impl TokenVerifier {
     pub async fn verify(&self, token: String) -> Result<Value> {
         self.verifier
+            .read()
+            .await
             .verify(token)
             .await
             .map_err(|e| Error::TokenVerificationFailed { source: e })
     }
 
     pub async fn from_config(config: AttestationTokenVerifierConfig) -> Result<Self> {
-        let verifier = JwkAttestationTokenVerifier::new(&config)
-            .await
-            .map_err(|e| Error::TokenVerifierInitialization { source: e })?;
+        let verifier: Arc<RwLock<dyn AttestationTokenVerifier + Send + Sync>> =
+            match config.attestation_token_type {
+                AttestationTokenVerifierType::Jwk => Arc::new(RwLock::new(
+                    JwkAttestationTokenVerifier::new(&config)
+                        .await
+                        .map_err(|e| Error::TokenVerifierInitialization { source: e })?,
+                )),
+                AttestationTokenVerifierType::Ear => Arc::new(RwLock::new(
+                    EarAttestationTokenVerifier::new(&config)
+                        .map_err(|e| Error::TokenVerifierInitialization { source: e })?,
+                )),
+            };
 
         let mut extra_teekey_paths = config.extra_teekey_paths;
         extra_teekey_paths.push(TOKEN_TEE_PUBKEY_PATH_ITA.into());
         extra_teekey_paths.push(TOKEN_TEE_PUBKEY_PATH_COCO.into());
+        extra_teekey_paths.push(TOKEN_TEE_PUBKEY_PATH_EAR.into());
 
         Ok(Self {
             verifier,

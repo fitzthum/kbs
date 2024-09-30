@@ -4,7 +4,10 @@
 
 use crate::{
     attestation::backend::{generic_generate_challenge, make_nonce, Attest},
-    token::{jwk::JwkAttestationTokenVerifier, AttestationTokenVerifierConfig},
+    token::{
+        jwk::JwkAttestationTokenVerifier, AttestationTokenVerifier, AttestationTokenVerifierConfig,
+        AttestationTokenVerifierType,
+    },
 };
 use anyhow::*;
 use async_trait::async_trait;
@@ -293,6 +296,7 @@ impl Attest for IntelTrustAuthority {
 impl IntelTrustAuthority {
     pub async fn new(config: IntelTrustAuthorityConfig) -> Result<Self> {
         let token_verifier = JwkAttestationTokenVerifier::new(&AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Jwk,
             extra_teekey_paths: vec![],
             trusted_certs_paths: vec![],
             trusted_jwk_sets: vec![config.certs_file.clone()],

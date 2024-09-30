@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::token::AttestationTokenVerifierConfig;
+use crate::token::{AttestationTokenVerifier, AttestationTokenVerifierConfig};
 use anyhow::{anyhow, bail, Context};
+use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
@@ -196,8 +197,11 @@ impl JwkAttestationTokenVerifier {
 
         Ok(key)
     }
+}
 
-    pub async fn verify(&self, token: String) -> anyhow::Result<Value> {
+#[async_trait]
+impl AttestationTokenVerifier for JwkAttestationTokenVerifier {
+    async fn verify(&self, token: String) -> anyhow::Result<Value> {
         let header = decode_header(&token).context("Failed to decode attestation token header")?;
 
         let key = self.get_verification_jwk(&header)?;

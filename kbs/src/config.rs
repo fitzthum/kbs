@@ -113,7 +113,7 @@ mod tests {
             PluginsConfig,
         },
         policy_engine::{PolicyEngineConfig, DEFAULT_POLICY_PATH},
-        token::AttestationTokenVerifierConfig,
+        token::{AttestationTokenVerifierConfig, AttestationTokenVerifierType},
     };
 
     use super::KbsConfig;
@@ -130,6 +130,7 @@ mod tests {
     #[rstest]
     #[case("test_data/configs/coco-as-grpc-1.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_certs_paths: vec!["/etc/ca".into(), "/etc/ca2".into()],
             insecure_key: false,
             trusted_jwk_sets: vec![],
@@ -170,6 +171,7 @@ mod tests {
     })]
     #[case("test_data/configs/coco-as-builtin-1.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_certs_paths: vec![],
             insecure_key: false,
             trusted_jwk_sets: vec![],
@@ -213,6 +215,7 @@ mod tests {
     })]
     #[case("test_data/configs/intel-ta-1.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_jwk_sets: vec!["/etc/ca".into(), "/etc/ca2".into()],
             insecure_key: false,
             trusted_certs_paths: vec![],
@@ -284,6 +287,7 @@ mod tests {
     })]
     #[case("test_data/configs/coco-as-builtin-2.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_certs_paths: vec![],
             insecure_key: false,
             trusted_jwk_sets: vec![],
@@ -323,6 +327,7 @@ mod tests {
     })]
     #[case("test_data/configs/intel-ta-2.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_jwk_sets: vec!["https://portal.trustauthority.intel.com".into()],
             insecure_key: false,
             trusted_certs_paths: vec![],
@@ -383,6 +388,7 @@ mod tests {
     })]
     #[case("test_data/configs/intel-ta-3.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_jwk_sets: vec!["https://portal.trustauthority.intel.com".into()],
             insecure_key: false,
             trusted_certs_paths: vec![],
@@ -415,6 +421,7 @@ mod tests {
     })]
     #[case("test_data/configs/coco-as-builtin-3.toml",         KbsConfig {
         attestation_token: AttestationTokenVerifierConfig {
+            attestation_token_type: AttestationTokenVerifierType::Ear,
             trusted_certs_paths: vec![],
             insecure_key: false,
             trusted_jwk_sets: vec![],
