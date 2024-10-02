@@ -3,7 +3,8 @@ sockets = ["0.0.0.0:8080"]
 insecure_http = true
 
 [attestation_token]
-insecure_key = true
+attestation_token_type = "Ear"
+trusted_certs_paths = ["/opt/confidential-containers/kbs/user-keys/as-public.pem"]
 
 [attestation_service]
 type = "coco_as_grpc"

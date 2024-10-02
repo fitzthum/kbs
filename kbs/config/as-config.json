@@ -1,5 +1,5 @@
 {
-    "work_dir": "/opt/confidential-containers/attestation-service",
+    "work_dir": "/opt/confidential-containers/attestation-service/data",
     "policy_engine": "opa",
     "rvps_config": {
 	    "remote_addr":"http://rvps:50003"
