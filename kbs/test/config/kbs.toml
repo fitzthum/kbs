@@ -5,14 +5,13 @@ certificate = "./work/https.crt"
 insecure_http = false
 
 [attestation_token]
-insecure_key = false
-trusted_certs_paths = ["./work/ca-cert.pem"]
+attestation_token_type = "Ear"
+trusted_certs_paths = ["./work/as-public-key.pem"]
 
 [attestation_service]
 type = "coco_as_builtin"
 work_dir = "./work/attestation-service"
 policy_engine = "opa"
-attestation_token_broker = "Simple"
 
     [attestation_service.attestation_token_broker]
     type = "Ear"
