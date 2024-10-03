@@ -5,17 +5,20 @@ sockets = ["0.0.0.0:8080"]
 insecure_http = true
 
 [attestation_token]
-insecure_key = true
+attestation_token_type = "Ear"
+trusted_certs_paths = ["/kbs/as-public-key.pem"]
 
 [attestation_service]
 type = "coco_as_builtin"
 work_dir = "/opt/confidential-containers/attestation-service"
 policy_engine = "opa"
-attestation_token_broker = "Simple"
 
-<<<<<<< HEAD
-    [attestation_service.attestation_token_config]
+    [attestation_service.attestation_token_broker]
+    type = "Ear"
     duration_min = 5
+
+    [attestation_service.attestation_token_broker.signer]
+    key_path = "/kbs/as-private-key.pem"
 
     [attestation_service.rvps_config]
     store_type = "LocalFs"
@@ -28,15 +31,3 @@ auth_public_key = "/kbs/kbs.pem"
 name = "resource"
 type = "LocalFs"
 dir_path = "/opt/confidential-containers/kbs/repository"
-=======
-[as_config.attestation_token_broker]
-type = "Ear"
-duration_min = 5
-
-[as_config.attestation_token_broker.signer]
-key_path = "/kbs/as-private-key.pem"
-
-[as_config.rvps_config]
-store_type = "LocalFs"
-remote_addr = ""
->>>>>>> ee78aaa (token: implement EAR token generation)

@@ -31,6 +31,15 @@ kbs_cert="${k8s_cnf_dir}/base/kbs.pem"
     openssl pkey -in "${k8s_cnf_dir}/base/kbs.key" -pubout -out "${kbs_cert}"
 }
 
+# Create keypair for signing and verifying attestation token
+as_key="${k8s_cnf_dir}/base/pkey.pem"
+as_key_priv="${k8s_cnf_dir}/base/as-private-key.pem"
+as_key_pub="${k8s_cnf_dir}/base/as-public-key.pem"
+
+openssl ecparam -name prime256v1 -genkey -noout -out ${as_key}
+openssl pkcs8 -topk8 -inform PEM -outform PEM -in ${as_key} -nocrypt -out ${as_key_priv}
+openssl ec -in ${as_key_priv} -pubout -out ${as_key_pub}
+
 
 if [[ "${DEPLOYMENT_DIR}" == "nodeport" || "${DEPLOYMENT_DIR}" == "overlays" ]]; then
     kubectl apply -k "${k8s_cnf_dir}/${DEPLOYMENT_DIR}"
