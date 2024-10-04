@@ -175,7 +175,7 @@ impl AttestationService {
         runtime_data_hash_algorithm: HashAlgorithm,
         init_data: Option<Data>,
         init_data_hash_algorithm: HashAlgorithm,
-        policy_ids: Vec<String>,
+        policy_id: String,
     ) -> Result<String> {
         let verifier = verifier::to_verifier(&tee)?;
 
@@ -218,11 +218,7 @@ impl AttestationService {
 
         let appraisal = self
             .policy_engine
-            .evaluate(
-                reference_data_map.clone(),
-                tcb_claims,
-                policy_ids[0].clone(),
-            )
+            .evaluate(reference_data_map.clone(), tcb_claims, policy_id.clone())
             .await
             .map_err(|e| anyhow!("Policy Engine evaluation failed: {e}"))?;
 
