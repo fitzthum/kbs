@@ -212,9 +212,12 @@ impl PolicyEngine for OPA {
 #[cfg(test)]
 mod tests {
     use ear::RawValue;
+    use kbs_types::Tee;
     use rstest::rstest;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
+
+    use crate::transform_claims;
 
     use super::*;
 
@@ -228,15 +231,21 @@ mod tests {
     }
 
     fn dummy_input(product_id: u64, svn: u64, launch_digest: String) -> BTreeMap<String, RawValue> {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "productId".to_string(),
-            RawValue::Text(product_id.to_string()),
-        );
-        map.insert("svn".to_string(), RawValue::Text(svn.to_string()));
-        map.insert("launch_digest".to_string(), RawValue::Text(launch_digest));
+        let json_claims = json!({
+            "productId": product_id.to_string(),
+            "svn": svn.to_string(),
+            "launch_digest": launch_digest
+        });
 
-        map
+        let ear_claims = transform_claims(
+            json_claims,
+            Value::String("".to_string()),
+            Value::String("".to_string()),
+            Tee::Sample,
+        )
+        .unwrap();
+
+        ear_claims
     }
 
     #[rstest]
