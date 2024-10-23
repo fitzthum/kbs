@@ -95,7 +95,7 @@ pub struct AttestationService {
     _config: Config,
     policy_engine: Box<dyn PolicyEngine + Send + Sync>,
     rvps: Box<dyn RvpsApi + Send + Sync>,
-    token_broker: AttestationTokenBroker,
+    token_broker: Box<dyn AttestationTokenBroker + Send + Sync>,
 }
 
 impl AttestationService {
@@ -115,7 +115,9 @@ impl AttestationService {
             .await
             .map_err(ServiceError::Rvps)?;
 
-        let token_broker = AttestationTokenBroker::new(config.attestation_token_config.clone())?;
+        let token_broker = config
+            .attestation_token_broker
+            .to_token_broker(config.attestation_token_config.clone())?;
 
         Ok(Self {
             _config: config,
@@ -200,8 +202,8 @@ impl AttestationService {
 
         let tcb_claims = transform_claims(
             claims_from_tee_evidence,
-            init_data_claims,
-            runtime_data_claims,
+            init_data_claims.clone(),
+            runtime_data_claims.clone(),
             tee,
         )?;
         debug!("tcb_claims: {:#?}", tcb_claims);
@@ -228,7 +230,7 @@ impl AttestationService {
 
         info!("TCB Policy Evaluated Successfully");
 
-        let attestation_results_token = self.token_broker.issue(policy_results, tcb_claims)?;
+        let attestation_results_token = self.token_broker.issue(policy_results, tcb_claims, policy_id.clone(), init_data_claims, runtime_data_claims, tee)?;
         Ok(attestation_results_token)
     }
 
