@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use ear::{Appraisal, RawValue};
+use ear::RawValue;
+use regorus::Value;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -70,9 +71,10 @@ pub trait PolicyEngine {
     async fn evaluate(
         &self,
         reference_data_map: HashMap<String, Vec<String>>,
-        tcb_claims: BTreeMap<String, RawValue>,
+        tcb_claims: &BTreeMap<String, RawValue>,
         policy_id: String,
-    ) -> Result<Appraisal, PolicyError>;
+        rules: Vec<String>,
+    ) -> Result<HashMap<String, Value>, PolicyError>;
 
     async fn set_policy(&mut self, policy_id: String, policy: String) -> Result<(), PolicyError>;
 

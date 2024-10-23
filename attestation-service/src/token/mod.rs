@@ -6,12 +6,13 @@
 use anyhow::*;
 
 //use ear::{Algorithm, Appraisal, Ear, Extensions, VerifierID};
-use ear::{Algorithm, Appraisal, Ear, VerifierID};
+use ear::{Algorithm, Appraisal, Ear, RawValue, VerifierID};
 use openssl::ec::{EcGroup, EcKey};
 use openssl::nid::Nid;
 use openssl::pkey::PKey;
+use regorus::Value;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 const DEFAULT_TOKEN_DURATION: i64 = 5;
 const DEFAULT_PROFILE: &str = "tag:github.com,2024:confidential-containers/Trustee";
@@ -20,6 +21,7 @@ const DEFAULT_DEVELOPER_NAME: &str = "https://confidentialcontainers.org";
 pub struct AttestationTokenBroker {
     config: AttestationTokenConfig,
     private_key_bytes: Vec<u8>,
+    claim_names: Vec<String>,
 }
 
 impl AttestationTokenBroker {
@@ -29,13 +31,67 @@ impl AttestationTokenBroker {
             None => generate_ec_keys()?.0,
         };
 
+        let claim_names = vec![
+            "instance_identity".to_string(),
+            "configuration".to_string(),
+            "executables".to_string(),
+            "file_system".to_string(),
+            "hardware".to_string(),
+            "runtime_opaque".to_string(),
+            "storage_opaque".to_string(),
+            "sourced_data".to_string(),
+        ];
+
         Ok(Self {
             config,
             private_key_bytes,
+            claim_names,
         })
     }
 
-    pub fn issue_ear(&self, submods: BTreeMap<String, Appraisal>) -> Result<String> {
+    pub fn rules(&self) -> Vec<String> {
+        self.claim_names.clone()
+    }
+
+    pub fn issue(
+        &self,
+        policy_results: HashMap<String, Value>,
+        tcb_claims: BTreeMap<String, RawValue>,
+    ) -> Result<String> {
+        let mut appraisal = Appraisal::new();
+
+        for rule in self.claim_names.clone() {
+            if policy_results.contains_key(&rule) {
+                let claim_value = policy_results
+                    .get(&rule)
+                    .unwrap()
+                    .as_i8()
+                    .context("Policy claim value not i8")?;
+
+                appraisal
+                    .trust_vector
+                    .mut_by_name(&rule)
+                    .unwrap()
+                    .set(claim_value);
+            }
+        }
+
+        if !appraisal.trust_vector.any_set() {
+            bail!("At least one policy claim must be set.");
+        }
+
+        appraisal.update_status_from_trust_vector();
+        appraisal.annotated_evidence = tcb_claims;
+
+        // Token broker does not know the policy hash or id
+        appraisal.policy_id = None;
+        //appraisal.policy_id = Some(policy_hash);
+
+        // For now, create only one submod, called `cpu`.
+        // We can create more when we support attesting multiple devices at once.
+        let mut submods = BTreeMap::new();
+        submods.insert("cpu".to_string(), appraisal);
+
         let now = time::OffsetDateTime::now_utc();
 
         let ear = Ear {

@@ -5,24 +5,14 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::Engine;
-use ear::{Appraisal, RawValue};
+use ear::RawValue;
+use regorus::Value;
 use sha2::{Digest, Sha384};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
 use super::{PolicyDigest, PolicyEngine, PolicyError};
-
-const CLAIM_NAMES: [&str; 8] = [
-    "instance_identity",
-    "configuration",
-    "executables",
-    "file_system",
-    "hardware",
-    "runtime_opaque",
-    "storage_opaque",
-    "sourced_data",
-];
 
 #[derive(Debug, Clone)]
 pub struct OPA {
@@ -65,11 +55,10 @@ impl PolicyEngine for OPA {
     async fn evaluate(
         &self,
         reference_data_map: HashMap<String, Vec<String>>,
-        tcb_claims: BTreeMap<String, RawValue>,
+        tcb_claims: &BTreeMap<String, RawValue>,
         policy_id: String,
-    ) -> Result<Appraisal, PolicyError> {
-        let mut appraisal = Appraisal::new();
-
+        rules: Vec<String>,
+    ) -> Result<HashMap<String, Value>, PolicyError> {
         let policy_dir_path = self
             .policy_dir_path
             .to_str()
@@ -84,6 +73,7 @@ impl PolicyEngine for OPA {
 
         let mut engine = regorus::Engine::new();
 
+        /*
         let policy_hash = {
             use sha2::Digest;
             let mut hasher = sha2::Sha384::new();
@@ -91,6 +81,7 @@ impl PolicyEngine for OPA {
             let hex = hasher.finalize().to_vec();
             hex::encode(hex)
         };
+        */
 
         // Add policy as data
         engine
@@ -111,35 +102,22 @@ impl PolicyEngine for OPA {
             .context("set input")
             .map_err(PolicyError::SetInputDataFailed)?;
 
-        for claim_name in CLAIM_NAMES {
-            let rule = format!("data.policy.{}", claim_name);
+        let mut output_map = HashMap::new();
+        for rule in rules {
+            let full_rule = format!("data.policy.{}", rule);
 
-            if let Ok(claim_value) = engine.eval_rule(rule) {
-                let claim_value = claim_value
-                    .as_i64()
-                    .map_err(|_| PolicyError::InvalidClaimValue)?;
-                let claim_value =
-                    i8::try_from(claim_value).map_err(|_| PolicyError::InvalidClaimValue)?;
-
-                appraisal
-                    .trust_vector
-                    .mut_by_name(claim_name)
-                    .unwrap()
-                    .set(claim_value);
+            if let Ok(claim_value) = engine.eval_rule(full_rule.clone()) {
+                output_map.insert(full_rule, claim_value);
             }
         }
 
-        if !appraisal.trust_vector.any_set() {
+        if output_map.is_empty() {
             return Err(PolicyError::PolicyDenied {
                 policy_id: policy_id.clone(),
             });
         }
 
-        appraisal.update_status_from_trust_vector();
-        appraisal.annotated_evidence = tcb_claims;
-        appraisal.policy_id = Some(policy_hash);
-
-        Ok(appraisal)
+        Ok(output_map)
     }
 
     async fn set_policy(&mut self, policy_id: String, policy: String) -> Result<(), PolicyError> {

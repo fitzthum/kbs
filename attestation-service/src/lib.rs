@@ -20,10 +20,7 @@ use policy_engine::{PolicyEngine, PolicyEngineType};
 use rvps::{RvpsApi, RvpsError};
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384, Sha512};
-use std::{
-    collections::{BTreeMap, HashMap},
-    str::FromStr,
-};
+use std::{collections::HashMap, str::FromStr};
 use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 use tokio::fs;
@@ -216,20 +213,22 @@ impl AttestationService {
             .map_err(|e| anyhow!("Generate reference data failed: {:?}", e))?;
         debug!("reference_data_map: {:#?}", reference_data_map);
 
-        let appraisal = self
+        let rules = self.token_broker.rules();
+
+        let policy_results = self
             .policy_engine
-            .evaluate(reference_data_map.clone(), tcb_claims, policy_id.clone())
+            .evaluate(
+                reference_data_map.clone(),
+                &tcb_claims,
+                policy_id.clone(),
+                rules,
+            )
             .await
             .map_err(|e| anyhow!("Policy Engine evaluation failed: {e}"))?;
 
-        info!("TCB Appraisal Generated Successfully");
+        info!("TCB Policy Evaluated Successfully");
 
-        // For now, create only one submod, called `cpu`.
-        // We can create more when we support attesting multiple devices at once.
-        let mut submods = BTreeMap::new();
-        submods.insert("cpu".to_string(), appraisal);
-
-        let attestation_results_token = self.token_broker.issue_ear(submods)?;
+        let attestation_results_token = self.token_broker.issue(policy_results, tcb_claims)?;
         Ok(attestation_results_token)
     }
 
