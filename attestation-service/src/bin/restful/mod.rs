@@ -41,7 +41,7 @@ pub struct AttestationRequest {
     init_data: Option<Data>,
     runtime_data_hash_algorithm: Option<String>,
     init_data_hash_algorithm: Option<String>,
-    policy_id: String,
+    policy_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,7 +149,7 @@ pub async fn attestation(
             runtime_data_hash_algorithm,
             init_data,
             init_data_hash_algorithm,
-            request.policy_id,
+            request.policy_ids,
         )
         .await
         .context("attestation report evaluate")?;

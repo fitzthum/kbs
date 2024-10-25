@@ -1,5 +1,5 @@
 use crate::rvps::RvpsConfig;
-use crate::token::{AttestationTokenBrokerType, AttestationTokenConfig};
+use crate::token::AttestationTokenConfig;
 
 use serde::Deserialize;
 use std::fs::File;
@@ -8,28 +8,18 @@ use thiserror::Error;
 
 /// Environment macro for Attestation Service work dir.
 const AS_WORK_DIR: &str = "AS_WORK_DIR";
-const DEFAULT_WORK_DIR: &str = "/opt/confidential-containers/attestation-service";
+pub const DEFAULT_WORK_DIR: &str = "/opt/confidential-containers/attestation-service";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Config {
     /// The location for Attestation Service to store data.
     pub work_dir: PathBuf,
 
-    /// Policy Engine type.
-    pub policy_engine: String,
-
     /// Configurations for RVPS.
     pub rvps_config: RvpsConfig,
 
-    /// The Attestation Result Token Broker type.
-    ///
-    /// Possible values:
-    /// * `Ear`
-    /// * `Simple`
-    pub attestation_token_broker: AttestationTokenBrokerType,
-
     /// The Attestation Result Token Broker Config
-    pub attestation_token_config: AttestationTokenConfig,
+    pub attestation_token_broker: AttestationTokenConfig,
 }
 
 #[derive(Error, Debug)]
@@ -53,10 +43,8 @@ impl Default for Config {
 
         Config {
             work_dir,
-            policy_engine: "opa".to_string(),
             rvps_config: RvpsConfig::default(),
-            attestation_token_broker: AttestationTokenBrokerType::Ear,
-            attestation_token_config: AttestationTokenConfig::default(),
+            attestation_token_broker: AttestationTokenConfig::default(),
         }
     }
 }
@@ -80,5 +68,97 @@ impl TryFrom<&Path> for Config {
     fn try_from(config_path: &Path) -> Result<Self, ConfigError> {
         let file = File::open(config_path)?;
         serde_json::from_reader::<File, Config>(file).map_err(ConfigError::JsonFileParse)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use rstest::rstest;
+    use serde_json::json;
+
+    use crate::{
+        rvps::RvpsConfig,
+        token::{ear_broker, simple, AttestationTokenConfig},
+    };
+
+    use super::Config;
+
+    #[rstest]
+    #[case("./tests/configs/example1.json", Config {
+        work_dir: PathBuf::from("/var/lib/attestation-service/"),
+        rvps_config: RvpsConfig {
+            remote_addr: "".into(),
+            store_type: "LocalFs".into(),
+            store_config: json!({}),
+        },
+        attestation_token_broker: AttestationTokenConfig::Simple(simple::Configuration {
+            duration_min: 5,
+            issuer_name: "test".into(),
+            signer: None,
+            policy_dir: "/var/lib/attestation-service/policies".into(),
+        })
+    })]
+    #[case("./tests/configs/example2.json", Config {
+        work_dir: PathBuf::from("/var/lib/attestation-service/"),
+        rvps_config: RvpsConfig {
+            remote_addr: "".into(),
+            store_type: "LocalFs".into(),
+            store_config: json!({}),
+        },
+        attestation_token_broker: AttestationTokenConfig::Simple(simple::Configuration {
+            duration_min: 5,
+            issuer_name: "test".into(),
+            policy_dir: "/var/lib/attestation-service/policies".into(),
+            signer: Some(simple::TokenSignerConfig {
+                key_path: "/etc/key".into(),
+                cert_url: Some("https://example.io".into()),
+                cert_path: Some("/etc/cert.pem".into())
+            })
+        })
+    })]
+    #[case("./tests/configs/example3.json", Config {
+        work_dir: PathBuf::from("/var/lib/attestation-service/"),
+        rvps_config: RvpsConfig {
+            remote_addr: "".into(),
+            store_type: "LocalFs".into(),
+            store_config: json!({}),
+        },
+        attestation_token_broker: AttestationTokenConfig::Ear(ear_broker::Configuration {
+            duration_min: 5,
+            issuer_name: "test".into(),
+            signer: None,
+            policy_dir: "/var/lib/attestation-service/policies".into(),
+            developer_name: "someone".into(),
+            build_name: "0.1.0".into(),
+            profile_name: "tag:github.com,2024:confidential-containers/Trustee".into()
+        })
+    })]
+    #[case("./tests/configs/example4.json", Config {
+        work_dir: PathBuf::from("/var/lib/attestation-service/"),
+        rvps_config: RvpsConfig {
+            remote_addr: "".into(),
+            store_type: "LocalFs".into(),
+            store_config: json!({}),
+        },
+        attestation_token_broker: AttestationTokenConfig::Ear(ear_broker::Configuration {
+            duration_min: 5,
+            issuer_name: "test".into(),
+            policy_dir: "/var/lib/attestation-service/policies".into(),
+            developer_name: "someone".into(),
+            build_name: "0.1.0".into(),
+            profile_name: "tag:github.com,2024:confidential-containers/Trustee".into(),
+            signer: Some(ear_broker::TokenSignerConfig {
+                key_path: "/etc/key".into(),
+                cert_url: Some("https://example.io".into()),
+                cert_path: Some("/etc/cert.pem".into())
+            })
+        })
+    })]
+    fn read_config(#[case] config: &str, #[case] expected: Config) {
+        let config = std::fs::read_to_string(config).unwrap();
+        let config: Config = serde_json::from_str(&config).unwrap();
+        assert_eq!(config, expected);
     }
 }

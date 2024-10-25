@@ -8,79 +8,214 @@ use anyhow::*;
 //use ear::{Algorithm, Appraisal, Ear, Extensions, VerifierID};
 use ear::{Algorithm, Appraisal, Ear, RawValue, VerifierID};
 use kbs_types::Tee;
+use log::{debug, warn};
 use openssl::ec::{EcGroup, EcKey};
 use openssl::nid::Nid;
 use openssl::pkey::PKey;
-use regorus::Value;
 use serde::Deserialize;
+use serde_json::{json, Value};
+use serde_variant::to_variant_name;
+use shadow_rs::concatcp;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::Arc;
+use verifier::TeeEvidenceParsedClaim;
 
+use crate::policy_engine::{PolicyEngine, PolicyEngineType};
+use crate::token::DEFAULT_TOKEN_WORK_DIR;
 use crate::AttestationTokenBroker;
-use crate::token::AttestationTokenConfig;
+
+use super::{COCO_AS_ISSUER_NAME, DEFAULT_TOKEN_DURATION};
+
+pub const DEFAULT_PROFILE: &str = "tag:github.com,2024:confidential-containers/Trustee";
+pub const DEFAULT_DEVELOPER_NAME: &str = "https://confidentialcontainers.org";
+
+const DEFAULT_POLICY_DIR: &str = concatcp!(DEFAULT_TOKEN_WORK_DIR, "/ear/policies");
+
+const RULES: [&str; 8] = [
+    "instance_identity",
+    "configuration",
+    "executables",
+    "file_system",
+    "hardware",
+    "runtime_opaque",
+    "storage_opaque",
+    "sourced_data",
+];
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct TokenSignerConfig {
+    pub key_path: String,
+    pub cert_url: Option<String>,
+
+    // PEM format certificate chain.
+    pub cert_path: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct Configuration {
+    /// The Attestation Results Token duration time (in minutes)
+    /// Default: 5 minutes
+    #[serde(default = "default_duration")]
+    pub duration_min: i64,
+
+    /// For tokens, the issuer of the token
+    #[serde(default = "default_issuer_name")]
+    pub issuer_name: String,
+
+    /// The developer name to be used as part of the Verifier ID
+    /// in the EAR.
+    /// Default: `https://confidentialcontainers.org`
+    #[serde(default = "default_developer")]
+    pub developer_name: String,
+
+    /// The build name to be used as part of the Verifier ID
+    /// in the EAR.
+    /// The default value will be generated from the Cargo package
+    /// name and version of the AS.
+    #[serde(default = "default_build")]
+    pub build_name: String,
+
+    /// The Profile that describes the EAR token
+    /// Default: `tag:github.com,2024:confidential-containers/Trustee`
+    #[serde(default = "default_profile")]
+    pub profile_name: String,
+
+    /// Configuration for signing the EAR
+    /// If this is not specified, the EAR
+    /// will be signed with an ephemeral private key.
+    pub signer: Option<TokenSignerConfig>,
+
+    /// The path to the work directory that contains policies
+    /// to provision the tokens.
+    #[serde(default = "default_policy_dir")]
+    pub policy_dir: String,
+}
+
+#[inline]
+fn default_duration() -> i64 {
+    DEFAULT_TOKEN_DURATION
+}
+
+#[inline]
+fn default_issuer_name() -> String {
+    COCO_AS_ISSUER_NAME.to_string()
+}
+
+#[inline]
+fn default_developer() -> String {
+    DEFAULT_DEVELOPER_NAME.to_string()
+}
+
+#[inline]
+fn default_profile() -> String {
+    DEFAULT_PROFILE.to_string()
+}
+
+#[inline]
+fn default_build() -> String {
+    format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+}
+
+#[inline]
+fn default_policy_dir() -> String {
+    DEFAULT_POLICY_DIR.to_string()
+}
+
+impl Default for Configuration {
+    fn default() -> Self {
+        Self {
+            duration_min: default_duration(),
+            issuer_name: default_issuer_name(),
+            developer_name: default_developer(),
+            build_name: default_build(),
+            profile_name: default_profile(),
+            signer: None,
+            policy_dir: default_policy_dir(),
+        }
+    }
+}
 
 pub struct EarAttestationTokenBroker {
-    config: AttestationTokenConfig,
+    config: Configuration,
     private_key_bytes: Vec<u8>,
-    claim_names: Vec<String>,
+    policy_engine: Arc<dyn PolicyEngine>,
 }
 
 impl EarAttestationTokenBroker {
-    pub fn new(config: AttestationTokenConfig) -> Result<Self> {
-        let private_key_bytes = match config.clone().signer {
-            Some(signer) => std::fs::read(signer.key_path)?,
+    pub fn new(config: Configuration) -> Result<Self> {
+        let policy_engine = PolicyEngineType::OPA.to_policy_engine(
+            Path::new(&config.policy_dir),
+            include_str!("ear_default_policy.rego"),
+        )?;
+
+        let private_key_bytes = match &config.signer {
+            Some(signer) => std::fs::read(&signer.key_path)?,
             None => generate_ec_keys()?.0,
         };
-
-        let claim_names = vec![
-            "instance_identity".to_string(),
-            "configuration".to_string(),
-            "executables".to_string(),
-            "file_system".to_string(),
-            "hardware".to_string(),
-            "runtime_opaque".to_string(),
-            "storage_opaque".to_string(),
-            "sourced_data".to_string(),
-        ];
 
         Ok(Self {
             config,
             private_key_bytes,
-            claim_names,
+            policy_engine,
         })
     }
 }
 
+#[async_trait::async_trait]
 impl AttestationTokenBroker for EarAttestationTokenBroker {
-    fn rules(&self) -> Vec<String> {
-        self.claim_names.clone()
-    }
-
-    fn issue(
+    async fn issue(
         &self,
-        policy_results: HashMap<String, regorus::Value>,
-        tcb_claims: BTreeMap<String, RawValue>,
-        policy_id: String,
+        tcb_claims: TeeEvidenceParsedClaim,
+        policy_ids: Vec<String>,
         init_data_claims: serde_json::Value,
         runtime_data_claims: serde_json::Value,
+        reference_data_map: HashMap<String, Vec<String>>,
         tee: Tee,
     ) -> Result<String> {
+        let tcb_claims = transform_claims(
+            tcb_claims,
+            init_data_claims.clone(),
+            runtime_data_claims.clone(),
+            tee,
+        )?;
+        debug!("tcb_claims: {:#?}", tcb_claims);
+
+        let tcb_claims_json = serde_json::to_string(&tcb_claims)?;
+
+        let reference_data = json!({
+            "reference": reference_data_map,
+        });
+        let reference_data = serde_json::to_string(&reference_data)?;
+
+        if policy_ids.len() > 1 {
+            warn!("EAR token only accepts the first policy. The rest will be ignored.");
+        }
+
+        if policy_ids.is_empty() {
+            bail!("No policy is given for EAR token generation.");
+        }
+
+        let policy_results = self
+            .policy_engine
+            .evaluate(
+                &reference_data,
+                &tcb_claims_json,
+                &policy_ids[0],
+                &RULES[..],
+            )
+            .await?;
 
         let mut appraisal = Appraisal::new();
 
-        for rule in self.claim_names.clone() {
-            if policy_results.contains_key(&rule) {
-                let claim_value = policy_results
-                    .get(&rule)
-                    .unwrap()
-                    .as_i8()
-                    .context("Policy claim value not i8")?;
+        for (k, v) in &policy_results.rules_result {
+            let claim_value = v.as_i8().context("Policy claim value not i8")?;
 
-                appraisal
-                    .trust_vector
-                    .mut_by_name(&rule)
-                    .unwrap()
-                    .set(claim_value);
-            }
+            appraisal
+                .trust_vector
+                .mut_by_name(&k)
+                .unwrap()
+                .set(claim_value);
         }
 
         if !appraisal.trust_vector.any_set() {
@@ -89,7 +224,7 @@ impl AttestationTokenBroker for EarAttestationTokenBroker {
 
         appraisal.update_status_from_trust_vector();
         appraisal.annotated_evidence = tcb_claims;
-        appraisal.policy_id = Some(policy_id);
+        appraisal.policy_id = Some(policy_ids[0].clone());
 
         // For now, create only one submod, called `cpu`.
         // We can create more when we support attesting multiple devices at once.
@@ -125,33 +260,104 @@ fn generate_ec_keys() -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((pkey.private_key_to_pem_pkcs8()?, pkey.public_key_to_pem()?))
 }
 
+/// This function does three things.
+///
+/// 1) If the input claims include an init_data claim (meaning that
+///    the verifier has validated the init_data), add the JSON
+///    init_data_claims to the output claims. Do the same thing
+///    for the report_data and runtime_data_claims.
+///
+///    This means that the full init_data and report_data will be
+///    available in the token.
+///
+/// 2) Move all claims from input_claims except the ones mentioned
+///    in the previous step into their own Object under the tee name.
+///
+/// 3) Convert the claims from serde_json Values to RawValues from the
+///    EAR crate.
+///
+pub fn transform_claims(
+    mut input_claims: Value,
+    init_data_claims: Value,
+    runtime_data_claims: Value,
+    tee: Tee,
+) -> Result<BTreeMap<String, RawValue>> {
+    let mut output_claims = BTreeMap::new();
+
+    // If the verifier produces an init_data claim (meaning that
+    // it has validated the init_data hash), add the JSON init_data_claims,
+    // to the claims map. Do the same for the report data.
+    //
+    // These claims will be flattened and provided to the policy engine.
+    // They will also end up in the EAR token as part of the annotated evidence.
+    if let Some(claims_map) = input_claims.as_object_mut() {
+        if let Some(init_data) = claims_map.remove("init_data") {
+            output_claims.insert(
+                "init_data".to_string(),
+                RawValue::Text(init_data.as_str().unwrap().to_string()),
+            );
+
+            let transformed_claims: RawValue =
+                serde_json::from_str(&serde_json::to_string(&init_data_claims)?)?;
+            output_claims.insert("init_data_claims".to_string(), transformed_claims);
+        }
+
+        if let Some(report_data) = claims_map.remove("report_data") {
+            output_claims.insert(
+                "report_data".to_string(),
+                RawValue::Text(report_data.as_str().unwrap().to_string()),
+            );
+
+            let transformed_claims: RawValue =
+                serde_json::from_str(&serde_json::to_string(&runtime_data_claims)?)?;
+            output_claims.insert("runtime_data_claims".to_string(), transformed_claims);
+        }
+    }
+
+    let transformed_claims: RawValue =
+        serde_json::from_str(&serde_json::to_string(&input_claims)?)?;
+    output_claims.insert(to_variant_name(&tee)?.to_string(), transformed_claims);
+
+    Ok(output_claims)
+}
+
 #[cfg(test)]
 mod tests {
+    use assert_json_diff::assert_json_eq;
     use jsonwebtoken::DecodingKey;
-    use std::collections::BTreeMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     use super::*;
 
-    #[test]
-    fn test_issue_ear_ephemeral_key() {
-        let mut submods = BTreeMap::new();
-        submods.insert("cpu".to_string(), ear::Appraisal::new());
-
+    #[tokio::test]
+    async fn test_issue_ear_ephemeral_key() {
         // use default config with no signer.
         // this will sign the token with an ephemeral key.
-        let config = AttestationTokenConfig::default();
-        let broker = AttestationTokenBroker::new(config).unwrap();
+        let config = Configuration::default();
+        let broker = EarAttestationTokenBroker::new(config).unwrap();
 
-        let _token = broker.issue_ear(submods).unwrap();
+        let _token = broker
+            .issue(
+                json!({
+                    "claim": "claim1"
+                }),
+                vec!["default".into()],
+                json!({
+                    "initdata": "111"
+                }),
+                json!({
+                    "runtime_data": "111"
+                }),
+                HashMap::new(),
+                Tee::Sample,
+            )
+            .await
+            .unwrap();
     }
 
-    #[test]
-    fn test_issue_and_validate_ear() {
-        let mut submods = BTreeMap::new();
-        submods.insert("cpu".to_string(), ear::Appraisal::new());
-
+    #[tokio::test]
+    async fn test_issue_and_validate_ear() {
         let (private_key_bytes, public_key_bytes) = generate_ec_keys().unwrap();
 
         let mut private_key_file = NamedTempFile::new().unwrap();
@@ -163,15 +369,118 @@ mod tests {
             cert_path: None,
         };
 
-        let mut config = AttestationTokenConfig::default();
+        let mut config = Configuration::default();
         config.signer = Some(signer);
 
-        let broker = AttestationTokenBroker::new(config).unwrap();
-        let token = broker.issue_ear(submods).unwrap();
+        let broker = EarAttestationTokenBroker::new(config).unwrap();
+        let token = broker
+            .issue(
+                json!({
+                    "claim": "claim1"
+                }),
+                vec!["default".into()],
+                json!({
+                    "initdata": "111"
+                }),
+                json!({
+                    "runtime_data": "111"
+                }),
+                HashMap::new(),
+                Tee::Sample,
+            )
+            .await
+            .unwrap();
 
         let public_key = DecodingKey::from_ec_pem(&public_key_bytes).unwrap();
 
         let ear = Ear::from_jwt(&token, jsonwebtoken::Algorithm::ES256, &public_key).unwrap();
         ear.validate().unwrap();
+    }
+
+    #[test]
+    fn test_transform_claims() {
+        let json = json!({
+            "ccel": {
+                "kernel": "5b7aa6572f649714ff00b6a2b9170516a068fd1a0ba72aa8de27574131d454e6396d3bfa1727d9baf421618a942977fa",
+                "kernel_parameters": {
+                    "console": "hvc0",
+                    "root": "/dev/vda1",
+                    "rw": ""
+                }
+            },
+            "quote": {
+                "header":{
+                    "version": "0400",
+                    "att_key_type": "0200",
+                    "tee_type": "81000000",
+                    "reserved": "00000000",
+                    "vendor_id": "939a7233f79c4ca9940a0db3957f0607",
+                    "user_data": "d099bfec0a477aa85a605dceabf2b10800000000"
+                },
+                "body":{
+                    "mr_config_id": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "mr_owner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "mr_owner_config": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "mr_td": "705ee9381b8633a9fbe532b52345e8433343d2868959f57889d84ca377c395b689cac1599ccea1b7d420483a9ce5f031",
+                    "mrsigner_seam": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "report_data": "7c71fe2c86eff65a7cf8dbc22b3275689fd0464a267baced1bf94fc1324656aeb755da3d44d098c0c87382f3a5f85b45c8a28fee1d3bdb38342bf96671501429",
+                    "seam_attributes": "0000000000000000",
+                    "td_attributes": "0100001000000000",
+                    "mr_seam": "2fd279c16164a93dd5bf373d834328d46008c2b693af9ebb865b08b2ced320c9a89b4869a9fab60fbe9d0c5a5363c656",
+                    "tcb_svn": "03000500000000000000000000000000",
+                    "xfam": "e742060000000000"
+                }
+            },
+            "report_data": "7c71fe2c86eff65a7cf8dbc22b3275689fd0464a267baced1bf94fc1324656aeb755da3d44d098c0c87382f3a5f85b45c8a28fee1d3bdb38342bf96671501429",
+            "init_data": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        });
+
+        let init_data_claims = Value::String("".to_string());
+        let runtime_data_claims = Value::String("".to_string());
+        let transformed_claims =
+            transform_claims(json, init_data_claims, runtime_data_claims, Tee::Tdx)
+                .expect("flatten failed");
+
+        let expected_claims = json!({
+            "tdx": {
+                "ccel": {
+                    "kernel": "5b7aa6572f649714ff00b6a2b9170516a068fd1a0ba72aa8de27574131d454e6396d3bfa1727d9baf421618a942977fa",
+                    "kernel_parameters": {
+                        "console": "hvc0",
+                        "root": "/dev/vda1",
+                        "rw": ""
+                    }
+                },
+                "quote": {
+                    "header":{
+                        "version": "0400",
+                        "att_key_type": "0200",
+                        "tee_type": "81000000",
+                        "reserved": "00000000",
+                        "vendor_id": "939a7233f79c4ca9940a0db3957f0607",
+                        "user_data": "d099bfec0a477aa85a605dceabf2b10800000000"
+                    },
+                    "body":{
+                        "mr_config_id": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "mr_owner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "mr_owner_config": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "mr_td": "705ee9381b8633a9fbe532b52345e8433343d2868959f57889d84ca377c395b689cac1599ccea1b7d420483a9ce5f031",
+                        "mrsigner_seam": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "report_data": "7c71fe2c86eff65a7cf8dbc22b3275689fd0464a267baced1bf94fc1324656aeb755da3d44d098c0c87382f3a5f85b45c8a28fee1d3bdb38342bf96671501429",
+                        "seam_attributes": "0000000000000000",
+                        "td_attributes": "0100001000000000",
+                        "mr_seam": "2fd279c16164a93dd5bf373d834328d46008c2b693af9ebb865b08b2ced320c9a89b4869a9fab60fbe9d0c5a5363c656",
+                        "tcb_svn": "03000500000000000000000000000000",
+                        "xfam": "e742060000000000"
+                    }
+                }
+            },
+            "report_data": "7c71fe2c86eff65a7cf8dbc22b3275689fd0464a267baced1bf94fc1324656aeb755da3d44d098c0c87382f3a5f85b45c8a28fee1d3bdb38342bf96671501429",
+            "init_data": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "runtime_data_claims": "",
+            "init_data_claims": ""
+        });
+
+        assert_json_eq!(expected_claims, transformed_claims);
     }
 }

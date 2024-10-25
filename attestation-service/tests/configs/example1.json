@@ -6,6 +6,8 @@
     },
     "attestation_token_broker": {
         "type": "Simple",
-        "duration_min": 5
+        "duration_min": 5,
+        "policy_dir": "/var/lib/attestation-service/policies",
+        "issuer_name": "test"
     }
 }

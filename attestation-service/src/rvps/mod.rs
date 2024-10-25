@@ -38,7 +38,7 @@ fn default_store_config() -> Value {
     json!({})
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct RvpsConfig {
     /// Address of remote RVPS. If this field is given, a remote RVPS will be connected to.
     /// If this field is not given, a built-in RVPS will be used.

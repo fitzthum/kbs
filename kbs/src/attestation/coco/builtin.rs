@@ -41,7 +41,7 @@ impl Attest for BuiltInCoCoAs {
                 None,
                 HashAlgorithm::Sha384,
                 // TODO: figure out a better way to set the policy id
-                "default".to_string(),
+                vec!["default".to_string()],
             )
             .await
     }

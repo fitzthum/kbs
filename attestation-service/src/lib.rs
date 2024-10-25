@@ -8,7 +8,6 @@ pub mod config;
 pub mod policy_engine;
 mod rvps;
 mod token;
-mod utils;
 
 use crate::token::AttestationTokenBroker;
 
@@ -16,17 +15,14 @@ use anyhow::{anyhow, Context, Result};
 use config::Config;
 pub use kbs_types::{Attestation, Tee};
 use log::{debug, info};
-use policy_engine::{PolicyEngine, PolicyEngineType};
 use rvps::{RvpsApi, RvpsError};
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384, Sha512};
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
 use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 use tokio::fs;
 use verifier::{InitDataHash, ReportData};
-
-use crate::utils::transform_claims;
 
 /// Hash algorithms used to calculate runtime/init data binding
 #[derive(Display, EnumString, AsRefStr)]
@@ -93,7 +89,6 @@ pub enum ServiceError {
 
 pub struct AttestationService {
     _config: Config,
-    policy_engine: Box<dyn PolicyEngine + Send + Sync>,
     rvps: Box<dyn RvpsApi + Send + Sync>,
     token_broker: Box<dyn AttestationTokenBroker + Send + Sync>,
 }
@@ -107,21 +102,14 @@ impl AttestationService {
                 .map_err(ServiceError::CreateDir)?;
         }
 
-        let policy_engine = PolicyEngineType::from_str(&config.policy_engine)
-            .map_err(ServiceError::UnsupportedPolicy)?
-            .to_policy_engine(config.work_dir.as_path())?;
-
         let rvps = rvps::initialize_rvps_client(&config.rvps_config)
             .await
             .map_err(ServiceError::Rvps)?;
 
-        let token_broker = config
-            .attestation_token_broker
-            .to_token_broker(config.attestation_token_config.clone())?;
+        let token_broker = config.attestation_token_broker.to_token_broker()?;
 
         Ok(Self {
             _config: config,
-            policy_engine,
             rvps,
             token_broker,
         })
@@ -129,14 +117,14 @@ impl AttestationService {
 
     /// Set Attestation Verification Policy.
     pub async fn set_policy(&mut self, policy_id: String, policy: String) -> Result<()> {
-        self.policy_engine.set_policy(policy_id, policy).await?;
+        self.token_broker.set_policy(policy_id, policy).await?;
         Ok(())
     }
 
     /// Get Attestation Verification Policy List.
     /// The result is a `policy-id` -> `policy hash` map.
     pub async fn list_policies(&self) -> Result<HashMap<String, String>> {
-        self.policy_engine
+        self.token_broker
             .list_policies()
             .await
             .context("Cannot List Policy")
@@ -144,7 +132,7 @@ impl AttestationService {
 
     /// Get a single Policy content.
     pub async fn get_policy(&self, policy_id: String) -> Result<String> {
-        self.policy_engine
+        self.token_broker
             .get_policy(policy_id)
             .await
             .context("Cannot Get Policy")
@@ -174,7 +162,7 @@ impl AttestationService {
         runtime_data_hash_algorithm: HashAlgorithm,
         init_data: Option<Data>,
         init_data_hash_algorithm: HashAlgorithm,
-        policy_id: String,
+        policy_ids: Vec<String>,
     ) -> Result<String> {
         let verifier = verifier::to_verifier(&tee)?;
 
@@ -200,14 +188,6 @@ impl AttestationService {
             .map_err(|e| anyhow!("Verifier evaluate failed: {e:?}"))?;
         info!("{:?} Verifier/endorsement check passed.", tee);
 
-        let tcb_claims = transform_claims(
-            claims_from_tee_evidence,
-            init_data_claims.clone(),
-            runtime_data_claims.clone(),
-            tee,
-        )?;
-        debug!("tcb_claims: {:#?}", tcb_claims);
-
         let reference_data_map = self
             .rvps
             .get_digests()
@@ -215,22 +195,19 @@ impl AttestationService {
             .map_err(|e| anyhow!("Generate reference data failed: {:?}", e))?;
         debug!("reference_data_map: {:#?}", reference_data_map);
 
-        let rules = self.token_broker.rules();
-
-        let policy_results = self
-            .policy_engine
-            .evaluate(
-                reference_data_map.clone(),
-                &tcb_claims,
-                policy_id.clone(),
-                rules,
-            )
-            .await
-            .map_err(|e| anyhow!("Policy Engine evaluation failed: {e}"))?;
-
         info!("TCB Policy Evaluated Successfully");
 
-        let attestation_results_token = self.token_broker.issue(policy_results, tcb_claims, policy_id.clone(), init_data_claims, runtime_data_claims, tee)?;
+        let attestation_results_token = self
+            .token_broker
+            .issue(
+                claims_from_tee_evidence,
+                policy_ids,
+                init_data_claims,
+                runtime_data_claims,
+                reference_data_map,
+                tee,
+            )
+            .await?;
         Ok(attestation_results_token)
     }
 
@@ -259,8 +236,7 @@ fn parse_data(
 ) -> Result<(Option<Vec<u8>>, Value)> {
     match data {
         Some(value) => match value {
-            // Ear RawValue does not support NULL, so use an empty string
-            Data::Raw(raw) => Ok((Some(raw), Value::String("".to_string()))),
+            Data::Raw(raw) => Ok((Some(raw), Value::Null)),
             Data::Structured(structured) => {
                 // by default serde_json will enforence the alphabet order for keys
                 let hash_materials =
@@ -269,7 +245,7 @@ fn parse_data(
                 Ok((Some(digest), structured))
             }
         },
-        None => Ok((None, Value::String("".to_string()))),
+        None => Ok((None, Value::Null)),
     }
 }
 
@@ -282,8 +258,8 @@ mod tests {
     use crate::{Data, HashAlgorithm};
 
     #[rstest]
-    #[case(Some(Data::Raw(b"aaaaa".to_vec())), Some(b"aaaaa".to_vec()), HashAlgorithm::Sha384, Value::String("".to_string()))]
-    #[case(None, None, HashAlgorithm::Sha384, Value::String("".to_string()))]
+    #[case(Some(Data::Raw(b"aaaaa".to_vec())), Some(b"aaaaa".to_vec()), HashAlgorithm::Sha384, Value::Null)]
+    #[case(None, None, HashAlgorithm::Sha384, Value::Null)]
     #[case(Some(Data::Structured(json!({"b": 1, "a": "test", "c": {"d": "e"}}))), Some(hex::decode(b"e71ce8e70d814ba6639c3612ebee0ff1f76f650f8dbb5e47157e0f3f525cd22c4597480a186427c813ca941da78870c3").unwrap()), HashAlgorithm::Sha384, json!({"b": 1, "a": "test", "c": {"d": "e"}}))]
     fn parse_data_json_binding(
         #[case] input: Option<Data>,
