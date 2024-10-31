@@ -5,8 +5,9 @@
 use crate::token::{AttestationTokenVerifier, AttestationTokenVerifierConfig};
 use anyhow::*;
 use async_trait::async_trait;
-use ear::Ear;
+use ear::{Ear, ExtensionKind, ExtensionValue};
 use jsonwebtoken::DecodingKey;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct EarAttestationTokenVerifier {
     public_key_bytes: Vec<u8>,
@@ -29,9 +30,18 @@ impl EarAttestationTokenVerifier {
 impl AttestationTokenVerifier for EarAttestationTokenVerifier {
     async fn verify(&self, token: String) -> Result<serde_json::Value> {
         let public_key = DecodingKey::from_ec_pem(&self.public_key_bytes)?;
-        let ear = Ear::from_jwt(&token, jsonwebtoken::Algorithm::ES256, &public_key)?;
+        let mut ear = Ear::from_jwt(&token, jsonwebtoken::Algorithm::ES256, &public_key)?;
 
         ear.validate()?;
+        ear.extensions.register("exp", 4, ExtensionKind::Integer)?;
+
+        let exp = match ear.extensions.get_by_name("exp") {
+            Some(ExtensionValue::Integer(v)) => Duration::from_secs(v as u64),
+            _ => bail!("Invalid token expiration"),
+        };
+        if SystemTime::now().duration_since(UNIX_EPOCH)? > exp {
+            bail!("Token is expired.");
+        }
 
         Ok(serde_json::to_value(&ear)?)
     }
