@@ -34,7 +34,7 @@ default configuration := 36
 executables := 3 if {
 	# The sample attester does not report any launch digest.
 	# This is an example of how a real platform might validate executables.
-	input.sample.launch_digest in data.reference.launch_digest
+	input.sample.launch_digest in get_reference_value("data.reference.launch_digest")
 }
 
 # For the `hardware` trust claim, the value 2 stands for
@@ -42,19 +42,21 @@ executables := 3 if {
 #  verifications needed to demonstrate that these are genuine/
 #  supported.
 hardware := 2 if {
-	input.sample.svn in data.reference.svn
+	input.sample.svn in get_reference_value("data.reference.svn")
 }
 
 ##### SNP
 executables := 3 if {
 	# In the future, we might calculate this measurement here various components
-	input.snp.launch_measurement in data.reference.snp_launch_measurement
+	input.snp
+	input.snp.launch_measurement in get_reference_value("data.reference.snp_launch_measurement")
 }
 
 hardware := 2 if {
 	# Check the reported TCB to validate the ASP FW
-	input.snp.reported_tcb_bootloader in data.reference.snp_bootloader
-	input.snp.reported_tcb_microcode in data.reference.snp_microcode
+	input.snp
+	input.snp.reported_tcb_bootloader in get_reference_value("data.reference.snp_bootloader")
+	input.snp.reported_tcb_microcode in get_reference_value("data.reference.snp_microcode")
 	input.snp.reported_tcb_snp in data.reference.snp_snp_svn
 	input.snp.reported_tcb_tee in data.reference.snp_tee_svn
 }

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha384};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use super::{EvaluationResult, PolicyDigest, PolicyEngine, PolicyError};
 
@@ -69,6 +70,18 @@ impl PolicyEngine for OPA {
             .map_err(PolicyError::ReadPolicyFileFailed)?;
 
         let mut engine = regorus::Engine::new();
+        engine.set_enable_coverage(true);
+
+        let mut rv_report: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+
+        // extensions to get reference values
+        let rvs = rv_report.clone();
+        engine.add_extension("get_reference_value".to_string(), 1, Box::new(move | mut params: Vec<regorus::Value> | {
+            if let regorus::Value::String(s) = &params[0] {
+                rvs.lock().unwrap().push(s.to_string());
+            }
+            Ok(regorus::Value::Null)
+        }));
 
         let policy_hash = {
             use sha2::Digest;
@@ -107,6 +120,9 @@ impl PolicyEngine for OPA {
             rules_result.insert(rule.to_string(), claim_value);
         }
 
+        println!("rvs used: {:?}", rv_report.lock().unwrap());
+        let report = engine.get_coverage_report().unwrap();
+        //println!("{:?}", report.to_string_pretty());
         let res = EvaluationResult {
             rules_result,
             policy_hash,
