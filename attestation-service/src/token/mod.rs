@@ -8,10 +8,13 @@ use kbs_types::Tee;
 use serde::Deserialize;
 use shadow_rs::concatcp;
 use std::collections::HashMap;
+use std::sync::Arc;
 use strum::Display;
+use tokio::sync::Mutex;
 use verifier::TeeEvidenceParsedClaim;
 
 use crate::config::DEFAULT_WORK_DIR;
+use crate::RvpsApi;
 
 pub mod ear_broker;
 pub mod simple;
@@ -62,14 +65,14 @@ impl Default for AttestationTokenConfig {
 }
 
 impl AttestationTokenConfig {
-    pub fn to_token_broker(&self) -> Result<Box<dyn AttestationTokenBroker + Send + Sync>> {
+    pub fn to_token_broker(&self, rvps: Arc<Mutex<dyn RvpsApi + Send + Sync>>) -> Result<Box<dyn AttestationTokenBroker + Send + Sync>> {
         match self {
             AttestationTokenConfig::Simple(cfg) => Ok(Box::new(
-                simple::SimpleAttestationTokenBroker::new(cfg.clone())?,
+                simple::SimpleAttestationTokenBroker::new(cfg.clone(), rvps)?,
             )
                 as Box<dyn AttestationTokenBroker + Send + Sync>),
             AttestationTokenConfig::Ear(cfg) => Ok(Box::new(
-                ear_broker::EarAttestationTokenBroker::new(cfg.clone())?,
+                ear_broker::EarAttestationTokenBroker::new(cfg.clone(), rvps)?,
             )
                 as Box<dyn AttestationTokenBroker + Send + Sync>),
         }

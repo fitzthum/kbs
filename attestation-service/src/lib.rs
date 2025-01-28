@@ -18,9 +18,10 @@ use rvps::{RvpsApi, RvpsError};
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
+use std::sync::Arc;
 use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
-use tokio::fs;
+use tokio::{fs, sync::Mutex};
 use verifier::{InitDataHash, ReportData};
 
 /// Hash algorithms used to calculate runtime/init data binding
@@ -89,7 +90,7 @@ pub enum ServiceError {
 
 pub struct AttestationService {
     _config: Config,
-    rvps: Box<dyn RvpsApi + Send + Sync>,
+    rvps: Arc<Mutex<dyn RvpsApi + Send + Sync>>,
     token_broker: Box<dyn AttestationTokenBroker + Send + Sync>,
 }
 
@@ -106,7 +107,7 @@ impl AttestationService {
             .await
             .map_err(ServiceError::Rvps)?;
 
-        let token_broker = config.attestation_token_broker.to_token_broker()?;
+        let token_broker = config.attestation_token_broker.to_token_broker(rvps.clone())?;
 
         Ok(Self {
             _config: config,
@@ -191,6 +192,8 @@ impl AttestationService {
 
         let reference_data_map = self
             .rvps
+            .lock()
+            .await
             .get_digests()
             .await
             .map_err(|e| anyhow!("Generate reference data failed: {:?}", e))?;
@@ -213,6 +216,8 @@ impl AttestationService {
     /// Registry a new reference value
     pub async fn register_reference_value(&mut self, message: &str) -> Result<()> {
         self.rvps
+            .lock()
+            .await
             .verify_and_extract(message)
             .await
             .context("register reference value")

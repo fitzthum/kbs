@@ -10,17 +10,22 @@ use sha2::{Digest, Sha384};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::runtime::Runtime;
 
 use super::{EvaluationResult, PolicyDigest, PolicyEngine, PolicyError};
 
-#[derive(Debug, Clone)]
+use crate::RvpsApi;
+
+#[derive(Clone)]
 pub struct OPA {
     policy_dir_path: PathBuf,
+    rvps: Arc<Mutex<dyn RvpsApi + Send + Sync>>,
 }
 
 impl OPA {
-    pub fn new(work_dir: PathBuf, default_policy: &str) -> Result<Self, PolicyError> {
+    pub fn new(work_dir: PathBuf, default_policy: &str, rvps: Arc<Mutex<dyn RvpsApi + Send + Sync>>) -> Result<Self, PolicyError> {
         let mut policy_dir_path = work_dir;
 
         policy_dir_path.push("opa");
@@ -39,7 +44,7 @@ impl OPA {
                 .map_err(PolicyError::WriteDefaultPolicyFailed)?;
         }
 
-        Ok(Self { policy_dir_path })
+        Ok(Self { policy_dir_path, rvps })
     }
 
     fn is_valid_policy_id(policy_id: &str) -> bool {
@@ -70,17 +75,21 @@ impl PolicyEngine for OPA {
             .map_err(PolicyError::ReadPolicyFileFailed)?;
 
         let mut engine = regorus::Engine::new();
-        engine.set_enable_coverage(true);
 
         let mut rv_report: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let rvps = self.rvps.clone();
 
         // extensions to get reference values
         let rvs = rv_report.clone();
         engine.add_extension("get_reference_value".to_string(), 1, Box::new(move | mut params: Vec<regorus::Value> | {
+            let rt  = Runtime::new().unwrap();
+            /*
             if let regorus::Value::String(s) = &params[0] {
-                rvs.lock().unwrap().push(s.to_string());
+                async { rvs.lock().await.push(s.to_string()) };
             }
-            Ok(regorus::Value::Null)
+            */
+            let digest = rt.block_on(async {rvps.lock().await.get_digests().await.unwrap().into_values().collect::<Vec<_>>()[0][0].clone() });
+            Ok(regorus::Value::String(digest.into()))
         }));
 
         let policy_hash = {
@@ -120,9 +129,7 @@ impl PolicyEngine for OPA {
             rules_result.insert(rule.to_string(), claim_value);
         }
 
-        println!("rvs used: {:?}", rv_report.lock().unwrap());
-        let report = engine.get_coverage_report().unwrap();
-        //println!("{:?}", report.to_string_pretty());
+        //println!("rvs used: {:?}", rv_report.lock().await);
         let res = EvaluationResult {
             rules_result,
             policy_hash,

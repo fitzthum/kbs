@@ -8,8 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 use strum::EnumString;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 pub mod opa;
+
+use crate::RvpsApi;
 
 #[derive(Error, Debug)]
 pub enum PolicyError {
@@ -60,11 +63,13 @@ impl PolicyEngineType {
         &self,
         work_dir: &Path,
         default_policy: &str,
+        rvps: Arc<Mutex<dyn RvpsApi + Send + Sync>>,
     ) -> Result<Arc<dyn PolicyEngine>> {
         match self {
             PolicyEngineType::OPA => Ok(Arc::new(opa::OPA::new(
                 work_dir.to_path_buf(),
                 default_policy,
+                rvps,
             )?) as Arc<dyn PolicyEngine>),
         }
     }
