@@ -11,7 +11,7 @@ declare -g release_tag
 declare -A staged_to_release=(
     ["staged-images/kbs"]="key-broker-service"
     ["staged-images/kbs-grpc-as"]="key-broker-service"
-    ["staged-images/kbs-client"]="kbs-client"
+    #["staged-images/kbs-client"]="kbs-client"
     ["staged-images/rvps"]="reference-value-provider-service"
     ["staged-images/coco-as-grpc"]="attestation-service"
     ["staged-images/coco-as-restful"]="attestation-service"
@@ -21,9 +21,9 @@ declare -A staged_to_release_tag_prefix=(
     ["staged-images/kbs-client"]="sample_only-"
     ["staged-images/coco-as-restful"]="rest-"
 )
-declare -A staged_to_staged_tag_prefix=(
-    ["staged-images/kbs-client"]="sample_only-"
-)
+#declare -A staged_to_staged_tag_prefix=(
+#    ["staged-images/kbs-client"]="sample_only-"
+#)
 
 function usage_and_exit() {
     echo
@@ -88,11 +88,11 @@ function tag_and_push_packages() {
         release_pkg_name=${staged_to_release[${staged_pkg_name}]}
 
         # set staged tag prefix (if needed)
-        staged_tag_prefix=
-        if [[ -v staged_to_staged_tag_prefix[${staged_pkg_name}] ]]; then
-            staged_tag_prefix=${staged_to_staged_tag_prefix[${staged_pkg_name}]}
-        fi
-        staged_tag_full=${staged_tag_prefix}${release_candidate_sha}
+        #staged_tag_prefix=
+        #if [[ -v staged_to_staged_tag_prefix[${staged_pkg_name}] ]]; then
+        #    staged_tag_prefix=${staged_to_staged_tag_prefix[${staged_pkg_name}]}
+        #fi
+        staged_tag_full=${release_candidate_sha}
 
         # set release tag prefix (if needed)
         release_tag_prefix=
@@ -212,7 +212,7 @@ function teardown() {
 function main() {
     parse_args "$@"
     tag_and_push_packages
-    bump_kustomization_with_pr
+    #bump_kustomization_with_pr
     echo "Success. Exiting..."
 }
 
