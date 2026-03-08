@@ -13,6 +13,10 @@ pub mod spdm_response;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use base64::Engine;
+use nv_attestation_sdk::{
+    AttestationContext, DeviceType, HttpOptions, Logger, Nonce, NvatSdk,
+    SdkOptions, VerifierType, RimStore, OcspClient, 
+};
 use nvml_wrapper::enums::device::DeviceArchitecture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +24,7 @@ use std::collections::HashMap;
 use std::result::Result::Ok;
 use std::str::FromStr;
 use strum::{Display, EnumString};
+use tempfile::NamedTempFile;
 use tracing::{instrument, trace};
 
 use super::*;
@@ -57,12 +62,24 @@ pub struct NvidiaVerifierConfig {
 pub enum NvidiaVerifierType {
     #[default]
     Local,
+    Nvat(NvatVerifierConfig),
     Remote(NvidiaRemoteVerifierConfig),
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct NvidiaRemoteVerifierConfig {
     verifier_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct NvatVerifierConfig {
+    /// To use a RIM service other than <https://rim.attestation.nvidia.com>
+    rim_url: Option<String>,
+    rim_api_key: Option<String>,
+
+    /// To use an OCSP service other than <https://ocsp.attestation.nvidia.com>
+    ocsp_url: Option<String>,
+    ocsp_api_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -127,7 +144,7 @@ impl Nvidia {
 
         let nras_jwks = match verifier_type {
             NvidiaVerifierType::Remote(_) => Some(NrasJwks::new().await?),
-            NvidiaVerifierType::Local => None,
+            _ => None,
         };
 
         Ok(Nvidia {
@@ -135,8 +152,9 @@ impl Nvidia {
             nras_jwks,
         })
     }
-
-    async fn evaluate_device_remotely(
+    
+    /// Evaluate an NVIDIA device using NRAS
+    async fn evaluate_device_nras(
         &self,
         device: NvDeviceReportAndCert,
         expected_nonce_vec: Vec<u8>,
@@ -218,6 +236,81 @@ impl Nvidia {
         Ok((claims, tee_class.to_string()))
     }
 
+    /// Evaluate an NVIDIA device using the NVIDIA Attestation SDK Rust bindings
+    /// The attestation logic will be performed locally using the NVIDIA RIM service
+    /// for reference values and the NVIDIA OCSP service for revocation.
+    /// This is also compatible with Trust Outpost, for RIM caching.
+    fn evaluate_device_nvat(
+        &self,
+        device: NvDeviceReportAndCert,
+        expected_nonce_vec: Vec<u8>,
+        config: &NvatVerifierConfig,
+    ) -> Result<(TeeEvidenceParsedClaim, String)> {
+       let b64_engine = base64::engine::general_purpose::STANDARD;
+
+       let (tee_class, device_type) = match device.arch {
+            Architecture::Blackwell => ("gpu", DeviceType::Gpu),
+            Architecture::Hopper => ("gpu", DeviceType::Gpu),
+            Architecture::LS10 => ("switch", DeviceType::NvSwitch),
+        };
+
+        let opts = SdkOptions::new()?;
+        let _sdk = NvatSdk::init(opts)?;
+
+        let http_opts = HttpOptions::default_options()?;
+        let rim_store = RimStore::create_remote(
+            config.rim_url.as_deref(),
+            config.rim_api_key.as_deref(),
+            Some(&http_opts),
+        )?;
+
+        let ocsp_client = OcspClient::create_default(
+            config.ocsp_url.as_deref(),
+            config.ocsp_api_key.as_deref(),
+            Some(&http_opts),
+        )?;
+
+        let mut ctx = AttestationContext::new()?;
+  
+        ctx.set_device_type(device_type)?;
+        ctx.set_verifier_type(VerifierType::Local)?;
+
+        let nonce_hex = hex::encode(expected_nonce_vec);
+        let nonce = Nonce::from_hex(&nonce_hex)?;
+
+        let evidence_b64 = match hex::decode(&device.evidence) {
+            Ok(evidence) => b64_engine.encode(evidence),
+            Err(e) => {
+                debug!("Device evidence is not hex encoded (decoding failed with: {e}). Using it as is.");
+                device.evidence
+            }
+        };
+
+        let evidence_json = json!([
+            {
+                "arch": device.arch.to_string().to_uppercase(),
+                "certificate": device.certificate,
+                "evidence": evidence_b64,
+                "nonce": nonce_hex
+            }
+        ]);
+
+        let mut temp_file = NamedTempFile::new()?;
+        serde_json::to_writer(&mut temp_file, &evidence_json)?;
+        let evidence_json_file = temp_file.path().to_str().ok_or(anyhow!("Could not get tmp path"))?;
+
+        match tee_class {
+            "gpu" => ctx.set_gpu_evidence_from_json_file(evidence_json_file)?,
+            "switch" => ctx.set_switch_evidence_from_json_file(evidence_json_file)?,
+            _ => bail!("Unknown TEE class"),
+        }
+
+        let result = ctx.attest_device(Some(&nonce))?;
+        let claims = serde_json::from_str(&result.claims_json()?)?;
+
+        Ok((claims, tee_class.to_string()))
+    }
+
     fn evaluate_device_locally(
         &self,
         device: NvDeviceReportAndCert,
@@ -282,14 +375,16 @@ impl Verifier for Nvidia {
             regularize_data(expected_nonce, SPDM_NONCE_SIZE, "REPORT_DATA", "NVIDIA");
 
         for device in devices.device_evidence_list {
-            // we will need to pass some more stuff in, like the nonce
             let claims = match &self.verifier_type {
                 NvidiaVerifierType::Local => {
                     self.evaluate_device_locally(device, expected_nonce_vec.clone())?
                 }
                 NvidiaVerifierType::Remote(config) => {
-                    self.evaluate_device_remotely(device, expected_nonce_vec.clone(), config)
+                    self.evaluate_device_nras(device, expected_nonce_vec.clone(), config)
                         .await?
+                }
+                NvidiaVerifierType::Nvat(config) => {
+                    self.evaluate_device_nvat(device, expected_nonce_vec.clone(), config)?
                 }
             };
 
@@ -352,21 +447,24 @@ mod tests {
     }
 
     #[rstest]
-    #[case::local_verifier(true, "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
+    #[case::local_verifier("local", "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
+    #[case::nvat_verifier("nvat", "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
     // Tests with the remote verifier are ignored to avoid putting strain on NRAS.
     // Please run these tests if you make any changes to the verifier.
-    #[ignore]
-    #[case::remote_verifier(false, "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
+    #[case::remote_verifier("remote", "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
     // Use the remote verifier with evidence from a CoCo CI run
-    #[ignore]
-    #[case::remote_verifier_coco(false, "87d8e24ab336adafe228d49e83d745f6dba4ae505372b6a5704820856b343fece279b616efefc2aae21da80cf5581250", include_str!("../../test_data/nvidia/hopper_coco_report1.txt"), include_str!("../../test_data/nvidia/hopper_coco_certs1.txt"), Architecture::Hopper)]
+    #[case::coco_remote_verifier("remote", "87d8e24ab336adafe228d49e83d745f6dba4ae505372b6a5704820856b343fece279b616efefc2aae21da80cf5581250", include_str!("../../test_data/nvidia/hopper_coco_report1.txt"), include_str!("../../test_data/nvidia/hopper_coco_certs1.txt"), Architecture::Hopper)]
     // The local verifier does not currently work with this report, which is from a newer device
     // that has some unknown fields in opaque data.
     #[ignore]
-    #[case::local_verifier_coco(true, "87d8e24ab336adafe228d49e83d745f6dba4ae505372b6a5704820856b343fece279b616efefc2aae21da80cf5581250", include_str!("../../test_data/nvidia/hopper_coco_report1.txt"), include_str!("../../test_data/nvidia/hopper_coco_certs1.txt"), Architecture::Hopper)]
+    #[case::coco_local_verifier("local", "87d8e24ab336adafe228d49e83d745f6dba4ae505372b6a5704820856b343fece279b616efefc2aae21da80cf5581250", include_str!("../../test_data/nvidia/hopper_coco_report1.txt"), include_str!("../../test_data/nvidia/hopper_coco_certs1.txt"), Architecture::Hopper)]
+    #[case::coco_nvat_verifier("nvat", "87d8e24ab336adafe228d49e83d745f6dba4ae505372b6a5704820856b343fece279b616efefc2aae21da80cf5581250", include_str!("../../test_data/nvidia/hopper_coco_report1.txt"), include_str!("../../test_data/nvidia/hopper_coco_certs1.txt"), Architecture::Hopper)]
+    #[case::nvat_nvat_verifier("remote", "e97b23a1718095a0e9e35edca810768c70a6a5a389b705e753b197912bc11576", include_str!("../../test_data/nvidia/hopper.b64"), include_str!("../../test_data/nvidia/hopper.cert"), Architecture::Hopper)]
+    //#[case::nvat_verifier("nvat", "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/hopperAttestationReport.txt"), include_str!("../../test_data/nvidia/hopper_cert_chain_case1.txt"), Architecture::Hopper)]
+    #[case::switch_nvat_verifier("nvat", "931d8dd0add203ac3d8b4fbde75e115278eefcdceac5b87671a748f32364dfcb", include_str!("../../test_data/nvidia/ls10_report1.txt"), include_str!("../../test_data/nvidia/ls10_certs1.txt"), Architecture::LS10)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_evaluation(
-        #[case] local_verifier: bool,
+        #[case] verifier_type: &str,
         // The expected report data (as hex) that was used to create the evidence.
         #[case] expected_report_data: &str,
         // HW evidence as a hex string
@@ -401,9 +499,11 @@ mod tests {
         let report_data = ReportData::Value(&expected_report_data_vec);
         let init_data = InitDataHash::NotProvided;
 
-        let verifier_type = match local_verifier {
-            true => NvidiaVerifierType::Local,
-            false => NvidiaVerifierType::Remote(NvidiaRemoteVerifierConfig { verifier_url: None }),
+        let verifier_type = match verifier_type {
+            "local" => NvidiaVerifierType::Local,
+            "remote" => NvidiaVerifierType::Remote(NvidiaRemoteVerifierConfig { verifier_url: None }),
+            "nvat" => NvidiaVerifierType::Nvat(NvatVerifierConfig::default()),
+            _ => panic!("Unknown verifier type."),
         };
 
         let verifier_config = Some(NvidiaVerifierConfig {

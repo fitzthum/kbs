@@ -4120,6 +4120,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nv-attestation-sdk"
+version = "1.2.0"
+source = "git+https://github.com/NVIDIA/attestation-sdk?rev=0c1be386a8fbb8f2766a6a556d10df86f5fed9d3#0c1be386a8fbb8f2766a6a556d10df86f5fed9d3"
+dependencies = [
+ "nv-attestation-sdk-sys",
+]
+
+[[package]]
+name = "nv-attestation-sdk-sys"
+version = "1.2.0"
+source = "git+https://github.com/NVIDIA/attestation-sdk?rev=0c1be386a8fbb8f2766a6a556d10df86f5fed9d3#0c1be386a8fbb8f2766a6a556d10df86f5fed9d3"
+dependencies = [
+ "bindgen 0.72.1",
+]
+
+[[package]]
 name = "nvml-wrapper"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7507,6 +7523,7 @@ dependencies = [
  "jsonwebkey 0.4.0",
  "jsonwebtoken 10.3.0",
  "kbs-types",
+ "nv-attestation-sdk",
  "nvml-wrapper 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "openssl",
  "reqwest 0.12.28",
@@ -7521,6 +7538,7 @@ dependencies = [
  "sev 7.1.0",
  "sha2",
  "strum",
+ "tempfile",
  "thiserror 2.0.17",
  "time",
  "tokio",

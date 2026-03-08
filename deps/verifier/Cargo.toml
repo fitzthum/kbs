@@ -27,7 +27,7 @@ csv-verifier = ["codicon", "csv-rs", "eventlog", "openssl", "tokio/fs"]
 hygon-dcu-verifier = ["csv-rs"]
 cca-verifier = ["ear", "jsonwebtoken", "veraison-apiclient", "ccatoken"]
 se-verifier = ["openssl", "pv", "serde_with", "tokio/sync"]
-nvidia-verifier = ["nvml-wrapper", "jsonwebtoken", "asn1-rs", "openssl", "x509-parser"]
+nvidia-verifier = ["nv-attestation-sdk", "nvml-wrapper", "jsonwebtoken", "asn1-rs", "openssl", "x509-parser"]
 tpm-verifier = ["az-cvm-vtpm", "openssl", "tss-esapi"]
 
 [dependencies]
@@ -56,6 +56,10 @@ hex.workspace = true
 jsonwebkey = "0.4.0"
 jsonwebtoken = { workspace = true, default-features = false, optional = true }
 kbs-types.workspace = true
+nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev="0c1be386a8fbb8f2766a6a556d10df86f5fed9d3", optional = true }
+nvml-wrapper = { version = "0.11.0", optional = true, default-features = false, features = [
+    "serde",
+]}
 openssl = { version = "0.10.75", optional = true }
 pv = { version = "0.10.0", package = "s390_pv", optional = true }
 scroll = { version = "0.13.0", default-features = false, features = [
@@ -73,6 +77,7 @@ sev = { version = "7", default-features = false, features = [
     "serde",
 ], optional = true }
 sha2.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, optional = true }
 tracing.workspace = true
 intel-tee-quote-verification-rs = { git = "https://github.com/intel/confidential-computing.tee.dcap", tag = "DCAP_1.24", optional = true }
@@ -86,9 +91,6 @@ reqwest-middleware = "0.4.2"
 http-cache-reqwest = { version = "0.16.0", default-features = false, features = ["manager-moka"] }
 bitflags = { version = "2.10.0", features = ["serde"] }
 time = "0.3.41"
-nvml-wrapper = { version = "0.11.0", optional = true, default-features = false, features = [
-    "serde",
-] }
 tss-esapi = { version = "7.5", optional = true }
 
 [build-dependencies]
