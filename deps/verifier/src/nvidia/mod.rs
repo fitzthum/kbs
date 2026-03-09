@@ -14,15 +14,15 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use base64::Engine;
 use nv_attestation_sdk::{
-    AttestationContext, DeviceType, HttpOptions, Logger, Nonce, NvatSdk,
+    AttestationContext, DeviceType, HttpOptions, Nonce, NvatSdk,
     SdkOptions, VerifierType, RimStore, OcspClient, 
 };
-use nvml_wrapper::enums::device::DeviceArchitecture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::result::Result::Ok;
 use std::str::FromStr;
+use std::sync::Once;
 use strum::{Display, EnumString};
 use tempfile::NamedTempFile;
 use tracing::{instrument, trace};
@@ -44,6 +44,18 @@ pub const DMTF_MEASUREMENT_SPECIFICATION_VALUE: u8 = 1;
 /// Accessing NRAS requires entering into a licensing agreement with NVIDIA.
 /// Using Trustee with the NRAS remote verifier assumes that you have done this.
 pub const NRAS_URL: &str = "https://nras.attestation.nvidia.com/v4/attest";
+
+static INIT: Once = Once::new();
+
+fn ensure_sdk_init() -> Result<()> {
+    INIT.call_once(|| {
+        let opts = SdkOptions::new().expect("Failed to create SDK Options");
+        let sdk = NvatSdk::init(opts).expect("Failed to create SDK.");
+        std::mem::forget(sdk);
+    });
+
+    Ok(())
+}
 
 #[derive(Default, Debug)]
 pub struct Nvidia {
@@ -117,7 +129,7 @@ pub struct NvDeviceReportAndCertClaim {
 
 impl NvDeviceReportAndCertClaim {
     fn new(
-        device_arch: &DeviceArchitecture,
+        device_arch: &Architecture,
         device_uuid: &str,
         attestation_report: &NvidiaAttestationReport,
     ) -> Self {
@@ -254,17 +266,16 @@ impl Nvidia {
             Architecture::LS10 => ("switch", DeviceType::NvSwitch),
         };
 
-        let opts = SdkOptions::new()?;
-        let _sdk = NvatSdk::init(opts)?;
+        ensure_sdk_init()?;
 
         let http_opts = HttpOptions::default_options()?;
-        let rim_store = RimStore::create_remote(
+        let _rim_store = RimStore::create_remote(
             config.rim_url.as_deref(),
             config.rim_api_key.as_deref(),
             Some(&http_opts),
         )?;
 
-        let ocsp_client = OcspClient::create_default(
+        let _ocsp_client = OcspClient::create_default(
             config.ocsp_url.as_deref(),
             config.ocsp_api_key.as_deref(),
             Some(&http_opts),
@@ -344,7 +355,7 @@ impl Nvidia {
 
         // Build the device claims
         let device_claims = NvDeviceReportAndCertClaim::new(
-            &DeviceArchitecture::Hopper,
+            &device.arch,
             device.uuid.as_str(),
             &report,
         );
@@ -412,7 +423,7 @@ mod tests {
     fn test_build_claims_for_one_hopper_device() {
         env_logger::init();
 
-        let device_arch = DeviceArchitecture::Hopper;
+        let device_arch = Architecture::Hopper;
         let device_uuid: &str = "1111-2222-33333-444444-555555";
 
         let expected_nonce: &str =
